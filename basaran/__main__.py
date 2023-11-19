@@ -247,6 +247,105 @@ def create_completion_json(options, template):
     return jsonify(data)
 
 
+@app.route("/v1/chat/completions", methods=["GET", "POST"])
+def create_chat_completion():
+    """Create a completion for the provided prompt and parameters."""
+    schema = {
+        "prompt": str,
+        "min_tokens": int,
+        "max_tokens": int,
+        "temperature": float,
+        "top_p": float,
+        "n": int,
+        "stream": bool,
+        "logprobs": int,
+        "echo": bool,
+    }
+    options = parse_options(schema)
+    if "prompt" not in options:
+        options["prompt"] = ""
+
+    # Limit maximum resource usage.
+    if len(options["prompt"]) > COMPLETION_MAX_PROMPT:
+        options["prompt"] = options["prompt"][:COMPLETION_MAX_PROMPT]
+    if options.get("min_tokens", 0) > COMPLETION_MAX_TOKENS:
+        options["min_tokens"] = COMPLETION_MAX_TOKENS
+    if options.get("max_tokens", 0) > COMPLETION_MAX_TOKENS:
+        options["max_tokens"] = COMPLETION_MAX_TOKENS
+    if options.get("n", 0) > COMPLETION_MAX_N:
+        options["n"] = COMPLETION_MAX_N
+    if options.get("logprobs", 0) > COMPLETION_MAX_LOGPROBS:
+        options["logprobs"] = COMPLETION_MAX_LOGPROBS
+
+    # Create response body template.
+    template = {
+        "id": f"cmpl-{secrets.token_hex(12)}",
+        "object": "chat.completion.chunk" if "stream" in options and options["stream"] else "chat.completion",
+        "created": round(time.time()),
+        "model": SERVER_MODEL_NAME,
+        "choices": [],
+    }
+
+    # Return in event stream or plain JSON.
+    if options.pop("stream", False):
+        return create_chat_completion_stream(options, template)
+    else:
+        raise NotImplementedError
+        return create_completion_json(options, template)
+
+
+from .choice import reduce_chat_choice
+
+
+def create_chat_completion_stream(options, template):
+    """Return text completion results in event stream."""
+
+    # Serialize data for event stream.
+    def serialize(data):
+        data = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return f"data: {data}\n\n"
+
+    def stream():
+        data = template.copy()
+        data["choices"] = [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": ""},
+            "finish_reason": None,
+        }]
+        yield serialize(data)
+
+        buffers = {}
+        times = {}
+        for choice in stream_model(**options):
+            index = choice["index"]
+            now = time.time_ns()
+            if index not in buffers:
+                buffers[index] = []
+            if index not in times:
+                times[index] = now
+            buffers[index].append(choice)
+
+            # Yield data when exceeded the maximum buffering interval.
+            elapsed = (now - times[index]) // 1_000_000
+            if elapsed > COMPLETION_MAX_INTERVAL:
+                data = template.copy()
+                data["choices"] = [reduce_chat_choice(buffers[index])]
+                yield serialize(data)
+                buffers[index].clear()
+                times[index] = now
+
+        # Yield remaining data in the buffers.
+        for _, buffer in buffers.items():
+            if buffer:
+                data = template.copy()
+                data["choices"] = [reduce_choice(buffer)]
+                yield serialize(data)
+
+        yield "data: [DONE]\n\n"
+
+    return Response(stream(), mimetype="text/event-stream")
+
+
 @app.errorhandler(400)
 @app.errorhandler(404)
 @app.errorhandler(405)

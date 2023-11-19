@@ -75,3 +75,29 @@ def reduce_choice(choices):
         }
 
     return reduced
+
+
+def reduce_chat_choice(choices):
+    buffer = []
+    index = 0
+    finish_reason = None
+    tokens, token_logprobs, top_logprobs, text_offset = [], [], [], []
+    # All choice objects are expected to have the same shape.
+    for choice in choices:
+        buffer.append(choice["text"])
+        index = choice["index"]
+        finish_reason = choice["finish_reason"]
+        logprobs = choice["logprobs"]
+        if logprobs is not None:
+            tokens += logprobs["tokens"]
+            token_logprobs += logprobs["token_logprobs"]
+            top_logprobs += logprobs["top_logprobs"]
+            text_offset += logprobs["text_offset"]
+
+    # Create reduced object with the last seen index and finish reason.
+    reduced = {
+        "index": index,
+        "delta": {"content": "".join(buffer)},
+        "finish_reason": finish_reason,
+    }
+    return reduced
